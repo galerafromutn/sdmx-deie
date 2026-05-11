@@ -41,7 +41,8 @@ def procesar_hoja(df_raw):
         col0 = row[0].strip() if row else ''
 
         # Detectar año
-        match_anio = re.search(r'[Aa]ño\s+(\d{4})', col0)
+        fila_str = " ".join([str(x) for x in row])
+        match_anio = re.search(r'[Aa]ño\s+(\d{4})', fila_str)
         if match_anio:
             anio_actual = int(match_anio.group(1))
             meses_actuales = []
@@ -51,9 +52,9 @@ def procesar_hoja(df_raw):
         # Detectar fila de meses
         meses_fila = []
         for v in row:
-            v_clean = v.strip().lower().rstrip('*').strip()
-            if v_clean in MESES_MAP:
-                meses_fila.append(MESES_MAP[v_clean])
+            v_solo_letras = re.sub(r'[^a-zñáéíóú]', '', v.strip().lower())
+            if v_solo_letras in MESES_MAP:
+                meses_fila.append(MESES_MAP[v_solo_letras])
 
         if meses_fila and anio_actual:
             # Mirar hacia adelante para determinar modo
