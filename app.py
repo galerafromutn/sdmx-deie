@@ -24,9 +24,8 @@ def detectar_indicador(titulo):
     return "INDICADOR"
 
 def procesar_hoja(df_raw):
-    """Procesa una hoja con formato DEIE y devuelve lista de registros SDMX."""
-    
-    # Convertir todo a string para procesar
+    """Versión robusta para formatos DEIE Mendoza."""
+    # Convertimos a strings y limpiamos espacios
     rows = []
     for _, row in df_raw.iterrows():
         rows.append([str(v).strip() if pd.notna(v) else '' for v in row])
@@ -38,96 +37,78 @@ def procesar_hoja(df_raw):
     rubros_detectados = set()
 
     for i, row in enumerate(rows):
-        col0 = row[0].strip() if row else ''
-
-        # Detectar año
-        fila_str = " ".join([str(x) for x in row])
-        match_anio = re.search(r'[Aa]ño\s+(\d{4})', fila_str)
+        # 1. Búsqueda agresiva del AÑO (en cualquier celda de la fila)
+        fila_texto = " ".join(row).lower()
+        match_anio = re.search(r'año\s+(\d{4})', fila_texto)
         if match_anio:
             anio_actual = int(match_anio.group(1))
-            meses_actuales = []
-            modo = None
+            meses_actuales = [] # Resetear meses al cambiar de año
             continue
 
-        # Detectar fila de meses
-        meses_fila = []
-        for v in row:
-            v_solo_letras = re.sub(r'[^a-zñáéíóú]', '', v.strip().lower())
-            if v_solo_letras in MESES_MAP:
-                meses_fila.append(MESES_MAP[v_solo_letras])
+        # 2. Búsqueda de MESES (limpiando asteriscos y ruidos)
+        meses_en_fila = []
+        indices_meses = [] # Guardamos la posición de la columna del mes
+        for idx, col_val in enumerate(row):
+            v_clean = re.sub(r'[^a-zñáéíóú]', '', col_val.lower())
+            if v_clean in MESES_MAP:
+                meses_en_fila.append(MESES_MAP[v_clean])
+                indices_meses.append(idx)
 
-        if meses_fila and anio_actual:
-            # Mirar hacia adelante para determinar modo
-            modo_sig = None
-            for j in range(i+1, min(i+6, len(rows))):
-                r2 = rows[j]
-                c0 = r2[0].strip()
-                if any('Var' in str(x) for x in r2):
-                    modo_sig = 'variacion'
-                    break
-                # Si la primera columna no está vacía y no es encabezado, es valor
-                if c0 and c0 not in ['', 'nan'] and not any(x in c0 for x in ['Fuente', 'Dato', 'Nota', 'Promedio']):
-                    modo_sig = 'valor'
-                    break
-            if modo_sig == 'valor':
-                meses_actuales = meses_fila
-                modo = 'valor'
-            elif modo_sig == 'variacion':
+        if meses_en_fila and anio_actual:
+            meses_actuales = meses_en_fila
+            # Determinamos si esta sección es de 'valor' o 'variacion'
+            # Si el año anterior o la fila tiene 'Var', es variación
+            if 'var' in fila_texto:
                 modo = 'variacion'
+            else:
+                modo = 'valor'
             continue
 
-        # Detectar si la fila tiene "Var" → modo variación
-        if row and any('Var' in str(v) for v in row[:3]):
-            modo = 'variacion'
-            continue
-
-        # Ignorar filas vacías, de fuente, promedio, etc.
-        if not col0 or col0 in ['nan', ''] or any(x in col0 for x in ['Fuente', 'Dato', 'Nota', 'Promedio', '%', 'Rubros', 'rubros']):
-            continue
-
-        # Detectar rubro (cualquier texto no vacío que no sea encabezado)
-        if anio_actual and meses_actuales and col0 and col0 not in ['nan', '']:
+        # 3. Procesamiento de RUBROS y DATOS
+        # Solo procesamos si tenemos Año, Meses y la primera celda no está vacía
+        col0 = row[0]
+        if anio_actual and meses_actuales and col0 not in ['', 'nan']:
+            # Filtro para ignorar filas de basura o totales
+            if any(x in col0.lower() for x in ['fuente', 'nota', 'promedio', 'cuadro', '(*)']):
+                continue
+            
             rubro_nombre = col0.strip()
-            # Limpiar caracteres extraños
-            rubro_nombre = re.sub(r'\s+', ' ', rubro_nombre)
-            rubro_code = rubro_nombre.upper().replace(' ', '_')
-            # Reemplazar caracteres especiales
-            for a, b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U'),('Ñ','N'),('á','a'),('é','e'),('í','i'),('ó','o'),('ú','u')]:
+            # Limpieza para el INDICATOR de SQL
+            rubro_code = re.sub(r'[^a-zA-Z0-9]', '_', rubro_nombre.upper())
+            for a, b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U'),('Ñ','N')]:
                 rubro_code = rubro_code.replace(a, b)
+            
+            rubros_detectados.add(rubro_nombre)
 
-            data_vals = [v for v in row[1:] if v != '']
+            # Extraer valores basados en los índices de los meses detectados
+            for idx_mes, num_mes in enumerate(meses_actuales):
+                col_pos = indices_meses[idx_mes]
+                if col_pos < len(row):
+                    raw_val = row[col_pos].replace('.', '').replace(',', '.').strip()
+                    try:
+                        # Extraer solo el número (por si hay un "123,4 (p)")
+                        val_match = re.search(r'(\d+\.?\d*)', raw_val)
+                        valor = float(val_match.group(1)) if val_match else None
+                    except:
+                        valor = None
 
-            if modo == 'valor':
-                rubros_detectados.add(rubro_nombre)
-                for idx, mes in enumerate(meses_actuales):
-                    if idx < len(data_vals):
-                        v = data_vals[idx].replace('.', '').replace(',', '.').strip()
-                        try:
-                            valor = float(v)
-                        except:
-                            valor = None
+                    if modo == 'valor':
                         registros.append({
                             'FREQ': 'M',
                             'REF_AREA': 'AR-MZA',
                             'INDICATOR': rubro_code,
-                            'TIME_PERIOD': f"{anio_actual}-{mes:02d}",
+                            'TIME_PERIOD': f"{anio_actual}-{num_mes:02d}",
                             'OBS_VALUE': valor,
                             'OBS_STATUS': 'A',
                             'UNIT_MEASURE': 'INDEX',
                             'BASE_YEAR': '1988',
                             'VARIACION_PCT': None
                         })
-            elif modo == 'variacion':
-                for idx, mes in enumerate(meses_actuales):
-                    if idx < len(data_vals):
-                        v = data_vals[idx].replace(',', '.').strip()
-                        try:
-                            var = float(v)
-                        except:
-                            var = None
+                    elif modo == 'variacion':
+                        # Buscar el registro de valor ya creado para pegarle la variación
                         for rec in reversed(registros):
-                            if rec['TIME_PERIOD'] == f"{anio_actual}-{mes:02d}" and rec['INDICATOR'] == rubro_code:
-                                rec['VARIACION_PCT'] = var
+                            if rec['TIME_PERIOD'] == f"{anio_actual}-{num_mes:02d}" and rec['INDICATOR'] == rubro_code:
+                                rec['VARIACION_PCT'] = valor
                                 break
 
     registros.sort(key=lambda x: (x['TIME_PERIOD'], x['INDICATOR']))
