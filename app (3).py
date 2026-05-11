@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS public.{nombre_tabla} (
     id_registro   SERIAL PRIMARY KEY,
     "FREQ"        CHAR(1)       DEFAULT 'M',
     "REF_AREA"    VARCHAR(10)   DEFAULT '{ref_area}',
-    "INDICATOR"   VARCHAR(100)  NOT NULL,
+    "INDICATOR"   VARCHAR(255)  NOT NULL,
     "INDICATOR_LABEL" TEXT,
     "TIME_PERIOD" CHAR(7)       NOT NULL,
     "OBS_VALUE"   NUMERIC(18,6),
