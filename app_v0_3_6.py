@@ -2,33 +2,24 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="Conversor SDMX — DEIE Mendoza", layout="wide")
+st.set_page_config(page_title="Conversor SDMX", layout="wide")
 
-# --- Estilos ---
-st.markdown("""<style>.block-container { padding-top: 2rem; }.step-box { background: #f8f9fa; border-left: 4px solid #1f77b4; padding: 1rem 1.25rem; border-radius: 8px; margin-bottom: 1rem; }</style>""", unsafe_allow_html=True)
-
-# --- Constantes ---
-MESES_ES = {'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,'julio':7,'agosto':8,'septiembre':9,'setiembre':9,'octubre':10,'noviembre':11,'diciembre':12,'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12}
-
-# --- Funciones Core ---
+# --- Funciones de Procesamiento ---
 def normalizar(t):
+    if not t: return ""
     s = str(t).lower().strip()
     for a,b in [('á','a'),('é','e'),('í','i'),('ó','o'),('ú','u'),('ñ','n')]: s = s.replace(a,b)
     return s
 
 def limpiar_num(v):
+    if v is None or str(v).strip() in ["", "nan", "-", "..."]: return None
     s = str(v).strip().replace('.','').replace(',','.')
     s = re.sub(r'[^0-9.\-]', '', s)
     try: return float(s)
     except: return None
 
-def es_valido(t):
-    s = normalizar(t)
-    return s and len(s) > 1 and not any(x in s for x in ['fuente','nota','cuadro','gobierno'])
-
-# --- Interfaz Lateral ---
-st.sidebar.title("Configuración")
-uploaded_file = st.sidebar.file_uploader("Archivo Excel", type=["xlsx", "xls"])
+# --- Interfaz ---
+uploaded_file = st.sidebar.file_uploader("Subir Excel", type=["xlsx", "xls"])
 ref_area = st.sidebar.text_input("REF_AREA", "AR-MZA")
 unit_measure = st.sidebar.text_input("UNIT_MEASURE", "INDEX")
 base_year = st.sidebar.text_input("BASE_YEAR", "2004")
@@ -36,86 +27,94 @@ base_year = st.sidebar.text_input("BASE_YEAR", "2004")
 if uploaded_file:
     xl = pd.ExcelFile(uploaded_file)
     sheet = st.sidebar.selectbox("Hoja", xl.sheet_names)
-    rows = xl.parse(sheet, header=None).values.tolist()
+    df_raw = xl.parse(sheet, header=None)
+    rows = df_raw.values.tolist()
 
-    st.markdown('<div class="step-box"><b>Configuración de Tabla</b></div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
-    f_inicio = c1.number_input("Fila Encabezado (1...)", 1, len(rows), 1) - 1
+    f_enc = c1.number_input("Fila Encabezado (1...)", 1, len(rows), 1) - 1
     c_rubro = c2.number_input("Columna Rubros (A=0...)", 0, 20, 0)
 
     if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
         registros = []
         anio_ctx = None
-        mapa_cols = {} # Guardará {col_idx: (periodo, freq, tipo)}
+        mapa_cols = [] # Lista de dicts con la estructura de la tabla
 
-        # 1. Escaneo de Encabezado (Fila seleccionada)
-        fila_enc = rows[f_inicio]
-        
-        # Buscar año de contexto arriba de la fila de inicio
-        for r in range(max(0, f_inicio-10), f_inicio + 1):
+        # 1. Identificar contexto de año (buscar en filas superiores)
+        for r in range(max(0, f_enc - 15), f_enc + 1):
             for celda in rows[r]:
                 m = re.search(r'\b(19|20)\d{2}\b', str(celda))
                 if m: anio_ctx = m.group(0)
 
-        # Mapear columnas
+        # 2. Mapear columnas de la fila de encabezado
+        meses_dict = {'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,'julio':7,'agosto':8,'septiembre':9,'setiembre':9,'octubre':10,'noviembre':11,'diciembre':12,'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12}
+        
         ult_t, ult_f = None, 'M'
-        for i, celda in enumerate(fila_enc):
+        fila_header = rows[f_enc]
+        
+        for i, celda in enumerate(fila_header):
             s = normalizar(celda)
-            # ¿Es mes?
-            if s in MESES_ES:
-                p = f"{anio_ctx}-{MESES_ES[s]:02d}" if anio_ctx else f"0000-{MESES_ES[s]:02d}"
-                mapa_cols[i] = (p, 'M', 'INDEX')
+            
+            # Caso Mes
+            if s in meses_dict:
+                p = f"{anio_ctx}-{meses_dict[s]:02d}" if anio_ctx else f"0000-{meses_dict[s]:02d}"
+                mapa_cols.append({'idx': i, 't': p, 'f': 'M', 'tipo': 'INDEX'})
                 ult_t, ult_f = p, 'M'
-            # ¿Es año?
-            elif re.search(r'\b(19|20)\d{2}\b', str(celda)):
-                p = re.search(r'\b(19|20)\d{2}\b', str(celda)).group(0)
-                mapa_cols[i] = (p, 'A', 'INDEX')
+            # Caso Año
+            elif re.search(r'^(19|20)\d{2}$', str(celda).strip()):
+                p = str(celda).strip()
+                mapa_cols.append({'idx': i, 't': p, 'f': 'A', 'tipo': 'INDEX'})
                 ult_t, ult_f = p, 'A'
-                anio_ctx = p # Actualizamos contexto
-            # ¿Es Variación? (Sigue a un índice)
-            elif ('var' in s or '%' in s or s == '') and ult_t:
-                mapa_cols[i] = (ult_t, ult_f, 'VAR_PCT')
+                anio_ctx = p
+            # Caso Variación (Columna vacía o con texto de variación a la derecha de un índice)
+            elif i > 0 and i > c_rubro and ult_t:
+                # Si la celda es de variación o está vacía/es la siguiente al índice
+                if 'var' in s or '%' in s or s == "":
+                    mapa_cols.append({'idx': i, 't': ult_t, 'f': ult_f, 'tipo': 'VAR_PCT'})
+                    ult_t = None # Reset para no asignar VAR a todo lo que sigue
 
-        # 2. Escaneo de Datos
-        for r in range(f_inicio + 1, len(rows)):
+        # 3. Extraer Datos
+        for r in range(f_enc + 1, len(rows)):
             fila = rows[r]
             if len(fila) <= c_rubro: continue
             
             rubro_lbl = str(fila[c_rubro]).strip()
-            if not es_valido(rubro_lbl): continue
-            
-            # Si la fila tiene un año nuevo (cambio de bloque)
+            if not rubro_lbl or rubro_lbl.lower() in ['nan', 'none'] or len(rubro_lbl) < 2: continue
+            if any(x in rubro_lbl.lower() for x in ['fuente', 'nota', 'cuadro']): continue
+
+            # Actualizar año si la fila actual lo contiene (cambio de bloque)
             for celda in fila:
                 m = re.search(r'^(19|20)\d{2}$', str(celda).strip())
                 if m: anio_ctx = m.group(0)
 
-            for idx, (p, f, tipo) in mapa_cols.items():
-                val = limpiar_num(fila[idx] if idx < len(fila) else None)
+            for col in mapa_cols:
+                val = limpiar_num(fila[col['idx']] if col['idx'] < len(fila) else None)
                 if val is not None:
-                    # Corregir año si cambió
-                    t_final = p
-                    if f == 'M' and anio_ctx and "0000" in p:
-                        t_final = f"{anio_ctx}-{p.split('-')[1]}"
-                    elif f == 'M' and anio_ctx and "-" in p:
-                        t_final = f"{anio_ctx}-{p.split('-')[1]}"
+                    t_final = col['t']
+                    # Corregir año si se detectó uno nuevo
+                    if col['f'] == 'M' and anio_ctx:
+                        mes_ext = t_final.split('-')[1] if '-' in t_final else "01"
+                        t_final = f"{anio_ctx}-{mes_ext}"
 
                     registros.append({
-                        'FREQ': f, 'REF_AREA': ref_area, 'INDICATOR': rubro_lbl.upper().replace(' ','_'),
-                        'INDICATOR_LABEL': rubro_lbl, 'TIME_PERIOD': str(t_final),
-                        'OBS_MSR': tipo, 'OBS_VALUE': val, 'OBS_STATUS': 'A',
-                        'UNIT_MEASURE': unit_measure if tipo == 'INDEX' else 'PCT',
+                        'FREQ': col['f'],
+                        'REF_AREA': ref_area,
+                        'INDICATOR': rubro_lbl.upper().replace(' ','_'),
+                        'INDICATOR_LABEL': rubro_lbl,
+                        'TIME_PERIOD': str(t_final),
+                        'OBS_MSR': col['tipo'],
+                        'OBS_VALUE': val,
+                        'UNIT_MEASURE': unit_measure if col['tipo'] == 'INDEX' else 'PCT',
                         'BASE_YEAR': base_year
                     })
 
         if registros:
             df = pd.DataFrame(registros)
+            # Orden cronológico estricto
             df['prio'] = df['OBS_MSR'].map({'INDEX': 0, 'VAR_PCT': 1})
             df = df.sort_values(['TIME_PERIOD', 'INDICATOR', 'prio']).drop(columns=['prio'])
             
-            st.success(f"✅ {len(df)} registros detectados.")
+            st.success(f"Se procesaron {len(df)} registros.")
             st.dataframe(df, use_container_width=True)
-            st.download_button("Descargar CSV", df.to_csv(index=False).encode('utf-8'), "data.csv", "text/csv")
+            st.download_button("Descargar CSV", df.to_csv(index=False).encode('utf-8'), "data_sdmx.csv")
         else:
-            st.error("No se detectaron datos. Probá cambiando la 'Fila Encabezado'.")
-else:
-    st.info("Subí un Excel para comenzar.")
+            st.error("No se detectaron datos. Verificá la fila de encabezado y columna de rubros.")
