@@ -88,7 +88,6 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
             return f"{anio_ctx}-{MESES_ES[s]:02d}" if anio_ctx else None, 'M'
         m_a = re.fullmatch(r'(19|20)\d{2}', str(v).strip())
         if m_a: return m_a.group(0), 'A'
-        # Detectar columnas de variación (celdas con %, 'var' o vacías tras un mes)
         if 'var' in s or '%' in s or s == '': return 'VAR_MARKER', 'VAR'
         return None, None
 
@@ -104,7 +103,6 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
     for b_idx, f_enc_idx in enumerate(bloques):
         f_fin = bloques[b_idx + 1] if b_idx + 1 < len(bloques) else len(rows)
         
-        # Buscar Año de Contexto
         anio_bloque = None
         for r_off in range(-6, 2):
             idx_b = f_enc_idx + r_off
@@ -127,10 +125,8 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
             fila = rows[r_idx]
             if len(fila) <= col_rubro: continue
             rubro_lbl = str(fila[col_rubro]).strip()
-            
             if not es_rubro_valido(rubro_lbl): continue
             
-            # Actualizar año si la fila lo menciona
             for c_f in fila:
                 m_f = re.fullmatch(r'(19|20)\d{2}', str(c_f).strip())
                 if m_f: anio_bloque = m_f.group(0)
@@ -152,8 +148,6 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
     return registros, None
 
 # ─── Interfaz Streamlit ──────────────────────────────────────────────────────
-st.title("📊 Conversor SDMX — DEIE Mendoza")
-
 uploaded_file = st.sidebar.file_uploader("Subir Excel (.xlsx, .xls)", type=["xlsx", "xls"])
 
 if uploaded_file:
@@ -165,4 +159,50 @@ if uploaded_file:
     st.sidebar.divider()
     ref_area = st.sidebar.text_input("REF_AREA", "AR-MZA")
     unit_measure = st.sidebar.text_input("UNIT_MEASURE (Index)", "INDEX")
-    base_year = st.sidebar.text_input("BASE
+    base_year = st.sidebar.text_input("BASE_YEAR", "2004")
+    nombre_tabla = a_code(sheet)
+
+    c_ui_1, c_ui_2 = st.columns(2)
+    with c_ui_1:
+        st.markdown('<div class="step-box"><p class="step-title">1. Fila de Inicio</p></div>', unsafe_allow_html=True)
+        fila_inicio = st.number_input("Fila del primer encabezado", 1, len(rows), 1)
+    with c_ui_2:
+        st.markdown('<div class="step-box"><p class="step-title">2. Columna de Rubros</p></div>', unsafe_allow_html=True)
+        col_rubro = st.number_input("Columna de indicadores (A=0, B=1...)", 0, 20, 0)
+
+    if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
+        registros, error = parsear_datos_evolucionado(rows, fila_inicio-1, col_rubro, ref_area, unit_measure, base_year)
+        
+        if error:
+            st.error(f"❌ {error}")
+        elif not registros:
+            st.warning("⚠️ No se detectaron datos válidos.")
+        else:
+            df_out = pd.DataFrame(registros)
+            df_out['msr_priority'] = df_out['OBS_MSR'].map({'INDEX': 0, 'VAR_PCT': 1})
+            df_out = df_out.sort_values(by=['TIME_PERIOD', 'INDICATOR', 'msr_priority'])
+            df_out = df_out.drop(columns=['msr_priority'])
+            
+            anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
+            freqs = df_out['FREQ'].unique()
+
+            st.success(f"✅ Se procesaron {len(df_out):,} registros.")
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Registros", f"{len(df_out):,}")
+            m2.metric("Rubros", df_out['INDICATOR'].nunique())
+            m3.metric("Período", f"{anios[0]}—{anios[-1]}" if anios else "—")
+            m4.metric("Frecuencias", ", ".join(freqs))
+
+            with st.expander("👁️ Vista Previa (Orden Cronológico)", expanded=True):
+                st.dataframe(df_out.head(100), use_container_width=True)
+
+            csv_data = df_out.to_csv(index=False).encode('utf-8')
+            sql_data = generar_sql(nombre_tabla, f"{nombre_tabla}_sdmx.csv", ref_area)
+            
+            d_col1, d_col2 = st.columns(2)
+            d_col1.download_button("⬇️ Descargar CSV", csv_data, f"{nombre_tabla}_sdmx.csv", "text/csv", use_container_width=True)
+            d_col2.download_button("⬇️ Descargar SQL", sql_data.encode('utf-8'), f"{nombre_tabla}.sql", use_container_width=True)
+            st.code(sql_data, language="sql")
+else:
+    st.info("👋 Subí un archivo Excel en la barra lateral para empezar.")
