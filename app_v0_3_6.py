@@ -467,18 +467,30 @@ st.markdown("""<div class="step-box">
 </div>""", unsafe_allow_html=True)
 
 if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
-    with st.spinner("Procesando todos los bloques..."):
-        registros, error = parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year)
+    # RED DE SEGURIDAD: Validar que existan los datos mínimos
+    if not rows or col_rubro is None:
+        st.error("❌ Error de configuración: Asegurate de haber seleccionado la hoja y la columna de rubros.")
+    else:
+        with st.spinner("Procesando todos los bloques..."):
+            # Llamada segura a la función
+            registros, error = parsear_datos_evolucionado(
+                rows, 
+                int(fila_inicio), 
+                int(col_rubro), 
+                str(ref_area), 
+                str(unit_measure), 
+                str(base_year)
+            )
 
-    if error:
-        st.error(f"❌ {error}")
-    elif not registros:
-        st.error("❌ No se encontraron datos.")
-        with st.expander("🔍 Diagnóstico"):
-            for i in range(fila_inicio, min(fila_inicio+30, len(rows))):
-                enc = detectar_encabezado_en_fila(rows[i])
-                if enc:
-                    st.write(f"Fila {i+1}:", rows[i], "→", enc)
+        if error:
+            st.error(f"❌ {error}")
+        elif not registros:
+            st.warning("⚠️ No se encontraron registros. Probá ajustando la fila de inicio.")
+        else:
+            # ... (aquí sigue el resto de tu código de visualización que ya tenías)
+            df_out = pd.DataFrame(registros)
+            st.success(f"✅ Se procesaron {len(df_out)} registros correctamente.")
+            # (Mantener el código de descarga y tablas igual)
     else:
         df_out = pd.DataFrame(registros)
         anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
