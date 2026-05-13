@@ -244,70 +244,88 @@ def clasificar_columnas(rows, fila_enc, enc_raw):
 # ─── Parser multi-bloque ──────────────────────────────────────────────────────
 
 def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year):
+    # --- Función interna de detección para evitar NameError ---
+    def obtener_tiempo(v, anio_ctx):
+        if not v: return None, None
+        s = str(v).strip().lower()
+        for a,b in [('á','a'),('é','e'),('í','i'),('ó','o'),('ú','u'),('ñ','n')]:
+            s = s.replace(a,b)
+        
+        # 1. Meses
+        if s in MESES_ES:
+            return f"{anio_ctx}-{MESES_ES[s]:02d}" if anio_ctx else None, 'M'
+        # 2. Trimestres
+        m_t = re.search(r'(\d)[°º]?\s*(trim|t)', s)
+        if m_t: return f"{anio_ctx}-Q{m_t.group(1)}" if anio_ctx else None, 'Q'
+        # 3. Años
+        m_a = re.search(r'\b(19|20)\d{2}\b', str(v))
+        if m_a: return m_a.group(0), 'A'
+        # 4. Variación
+        if 'var' in s or '%' in s: return 'ES_VAR', 'VAR'
+        return None, None
+
     registros = []
-    bloques = []
+    bloques_indices = []
     
-    # 1. Localizar filas de encabezado
+    # --- Identificar Encabezados ---
     for i in range(int(fila_inicio), len(rows)):
-        fila = rows[i]
-        c_tiempo = [idx for idx, c in enumerate(fila) if resolver_dimension_temporal(c, None)[1] is not None]
-        if len(c_tiempo) >= 2:
-            bloques.append(i)
+        # Buscamos si la fila tiene al menos 2 columnas que parezcan tiempo
+        c_t = [idx for idx, c in enumerate(rows[i]) if obtener_tiempo(c, None)[1] is not None]
+        if len(c_t) >= 2:
+            bloques_indices.append(i)
 
-    if not bloques:
-        return [], "No se detectaron columnas de tiempo (meses/años) a partir de la fila seleccionada."
+    if not bloques_indices:
+        return [], "No se detectaron encabezados válidos (meses/años) desde la fila indicada."
 
-    # 2. Procesar bloques
-    for b_idx, f_enc_idx in enumerate(bloques):
-        f_fin = bloques[b_idx + 1] if b_idx + 1 < len(bloques) else len(rows)
-        f_enc = rows[f_enc_idx]
+    # --- Procesar Bloques ---
+    for idx_b, f_idx in enumerate(bloques_indices):
+        f_limite = bloques_indices[idx_b + 1] if idx_b + 1 < len(bloques_indices) else len(rows)
+        encabezado = rows[f_idx]
         
-        # Año de contexto
-        anio_ctx = None
-        for r_off in range(-10, 1):
-            idx_busqueda = f_enc_idx + r_off
-            if 0 <= idx_busqueda < len(rows):
-                for celda in rows[idx_busqueda]:
-                    m = re.search(r'\b(19|20)\d{2}\b', str(celda))
-                    if m: 
-                        anio_ctx = m.group(0)
-                        break
+        # Buscar Año Contexto (filas cercanas)
+        a_ctx = None
+        for r_off in range(-5, 2):
+            busqueda = f_idx + r_off
+            if 0 <= busqueda < len(rows):
+                for c in rows[busqueda]:
+                    m = re.search(r'\b(19|20)\d{2}\b', str(c))
+                    if m: a_ctx = m.group(0); break
         
-        # Mapeo de columnas
-        mapa_cols = []
-        u_t, u_f = None, 'M'
-        for idx, celda in enumerate(f_enc):
-            p, f = resolver_dimension_temporal(celda, anio_ctx)
-            if f == 'VAR' and u_t:
-                mapa_cols.append({'idx': idx, 't': u_t, 'f': u_f, 'tipo': 'VAR_PCT'})
+        # Mapa de columnas
+        mapa = []
+        ult_t, ult_f = None, 'M'
+        for c_idx, celda in enumerate(encabezado):
+            p, f = obtener_tiempo(celda, a_ctx)
+            if f == 'VAR' and ult_t:
+                mapa.append({'idx': c_idx, 't': ult_t, 'f': ult_f, 'tipo': 'VAR_PCT'})
             elif p:
-                mapa_cols.append({'idx': idx, 't': p, 'f': f, 'tipo': 'INDEX'})
-                u_t, u_f = p, f
+                mapa.append({'idx': c_idx, 't': p, 'f': f, 'tipo': 'INDEX'})
+                ult_t, ult_f = p, f
 
-        # Carga de datos
-        for r_idx in range(f_enc_idx + 1, f_fin):
+        # Leer Datos
+        for r_idx in range(f_idx + 1, f_limite):
             fila = rows[r_idx]
             if len(fila) <= col_rubro: continue
-            
             rubro = str(fila[col_rubro]).strip()
             if not es_rubro_valido(rubro): continue
             
-            for mc in mapa_cols:
-                val = limpiar_numero(fila[mc['idx']] if mc['idx'] < len(fila) else None)
+            # Actualizar año si aparece en la fila
+            for c_f in fila:
+                m_f = re.search(r'^(19|20)\d{2}$', str(c_f).strip())
+                if m_f: a_ctx = m_f.group(0)
+
+            for m in mapa:
+                val = limpiar_numero(fila[m['idx']] if m['idx'] < len(fila) else None)
                 if val is not None:
-                    t_final = mc['t']
-                    # Si el año cambió en la fila (ej: columna 0)
-                    for c_fila in fila:
-                        m_f = re.search(r'^(19|20)\d{2}$', str(c_fila).strip())
-                        if m_f: anio_ctx = m_f.group(0)
-                    
-                    if mc['f'] == 'M' and anio_ctx and "-" in str(t_final):
-                        t_final = f"{anio_ctx}-{t_final.split('-')[1]}"
+                    t_res = m['t']
+                    if m['f'] == 'M' and a_ctx and "-" in str(t_res):
+                        t_res = f"{a_ctx}-{t_res.split('-')[1]}"
                     
                     registros.append({
-                        'FREQ': mc['f'], 'REF_AREA': ref_area, 'INDICATOR': a_code(rubro),
-                        'INDICATOR_LABEL': rubro, 'TIME_PERIOD': str(t_final), 'OBS_MSR': mc['tipo'],
-                        'OBS_VALUE': val, 'OBS_STATUS': 'A', 'UNIT_MEASURE': unit_measure if mc['tipo'] == 'INDEX' else 'PCT',
+                        'FREQ': m['f'], 'REF_AREA': ref_area, 'INDICATOR': a_code(rubro),
+                        'INDICATOR_LABEL': rubro, 'TIME_PERIOD': str(t_res), 'OBS_MSR': m['tipo'],
+                        'OBS_VALUE': val, 'OBS_STATUS': 'A', 
+                        'UNIT_MEASURE': unit_measure if m['tipo'] == 'INDEX' else 'PCT',
                         'BASE_YEAR': base_year
                     })
     return registros, None
@@ -450,15 +468,14 @@ st.markdown("""<div class="step-box">
 </div>""", unsafe_allow_html=True)
 
 if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
-    with st.spinner("Procesando bloques..."):
-        # Forzamos los tipos para que no haya errores de comunicación
+    with st.spinner("Procesando..."):
         registros, error = parsear_datos_evolucionado(
             rows, 
-            int(fila_inicio) - 1, # Ajuste de índice base 0
-            int(col_rubro), 
-            str(ref_area), 
-            str(unit_measure), 
-            str(base_year)
+            fila_inicio - 1, 
+            col_rubro, 
+            ref_area, 
+            unit_measure, 
+            base_year
         )
 
         if error:
