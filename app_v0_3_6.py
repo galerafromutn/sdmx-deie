@@ -483,16 +483,30 @@ if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True
         elif not registros:
             st.warning("⚠️ No se encontraron registros. Probá ajustando la fila de inicio.")
         else:
-            # ... (aquí sigue el resto de tu código de visualización que ya tenías)
             df_out = pd.DataFrame(registros)
-            st.success(f"✅ Se procesaron {len(df_out)} registros correctamente.")
-            # (Mantener el código de descarga y tablas igual)
+            
+            # --- PEGAR ESTO AQUÍ ---
+            # Extraemos los años únicos para la métrica
+            anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
+            freqs_out = df_out['FREQ'].unique()
+            # -----------------------
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Registros", f"{len(registros):,}")
-        c2.metric("Rubros", df_out['INDICATOR'].nunique())
-        c3.metric("Período", f"{anios[0]}–{anios[-1]}" if anios else "—")
-        c4.metric("Frecuencia", ", ".join(FREQ_LABEL.get(f,f) for f in freqs_out))
+            st.success(f"✅ Se procesaron {len(df_out):,} registros correctamente.")
+
+            # Métricas rápidas
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Registros", f"{len(df_out):,}")
+            c2.metric("Rubros", df_out['INDICATOR'].nunique())
+            
+            # Usamos la variable 'anios' que acabamos de definir arriba
+            if anios:
+                c3.metric("Período", f"{anios[0]}–{anios[-1]}")
+            else:
+                c3.metric("Período", "—")
+                
+            c4.metric("Frecuencia", ", ".join(f for f in freqs_out))
+
+            # El resto del código de visualización (expander, botones de descarga) sigue igual...
 
         if tiene_var:
             st.info("ℹ️ Se detectaron columnas INDEX y VAR_PCT.")
