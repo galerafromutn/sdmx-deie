@@ -29,15 +29,16 @@ def a_code(texto):
     return s.strip('_').upper()
 
 def limpiar_numero(valor):
-    if valor is None or str(valor).strip() in ("", ".", "-", "nan", "None"): return None
+    if valor is None or str(valor).strip() in ("", ".", "-", "nan", "None", "...", "/"): return None
     s = str(valor).strip().replace('.', '').replace(',', '.')
+    s = re.sub(r'[^0-9.\-]', '', s) # Limpieza extra de caracteres no numéricos
     try: return float(s)
     except: return None
 
 def es_rubro_valido(texto):
     s = normalizar(texto)
-    if not s or len(s) < 3 or s == 'nan': return False
-    ignorar = ['fuente', 'nota', 'cuadro', 'contacto', 'gobierno', 'mendoza']
+    if not s or len(s) < 2 or s == 'nan': return False
+    ignorar = ['fuente', 'nota', 'cuadro', 'contacto', 'gobierno', 'mendoza', 'elaboracion']
     return not any(p in s for p in ignorar)
 
 def generar_sql(tabla, archivo, area):
@@ -56,29 +57,35 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
     def obtener_tiempo(v, anio_ctx):
         if not v or str(v).lower() == 'nan': return None, None
         s = normalizar(v)
-        if s in MESES_ES: return f"{anio_ctx}-{MESES_ES[s]:02d}" if anio_ctx else None, 'M'
-        m_a = re.fullmatch(r'(19|20)\d{2}', str(v).strip())
+        # 1. Búsqueda de Meses
+        if s in MESES_ES:
+            return f"{anio_ctx}-{MESES_ES[s]:02d}" if anio_ctx else None, 'M'
+        # 2. Búsqueda de Años (Flexible: detecta 2010 incluso con asteriscos)
+        m_a = re.search(r'\b(19|20)\d{2}\b', str(v))
         if m_a: return m_a.group(0), 'A'
-        if 'var' in s or '%' in s or s == '': return 'VAR_MARKER', 'VAR'
+        # 3. Búsqueda de Variación (Detecta "Var", "%", o celdas vacías estratégicas)
+        if 'var' in s or '%' in s or s == '': 
+            return 'VAR_MARKER', 'VAR'
         return None, None
 
     registros = []
-    # 1. Identificar TODAS las filas de encabezado posibles
     bloques = []
+    
+    # 1. Identificar encabezados (Filtro más permisivo)
     for i in range(int(fila_inicio), len(rows)):
         c_t = [idx for idx, c in enumerate(rows[i]) if obtener_tiempo(c, 2024)[1] is not None]
-        if len(c_t) >= 2: bloques.append(i)
+        if len(c_t) >= 1: # Bajamos a 1 para no perder tablas pequeñas
+            bloques.append(i)
 
-    if not bloques: return [], "No se detectaron encabezados con meses o años."
+    if not bloques: return [], "No se detectaron encabezados temporales."
 
-    # Mantenemos el año de contexto persistente entre bloques
     anio_global = None
 
     for b_idx, f_enc_idx in enumerate(bloques):
         f_fin = bloques[b_idx + 1] if b_idx + 1 < len(bloques) else len(rows)
         
-        # Actualizar año de contexto buscando arriba y en el propio encabezado
-        for r_off in range(-8, 2):
+        # Búsqueda exhaustiva de año de contexto
+        for r_off in range(-10, 2):
             idx_b = f_enc_idx + r_off
             if 0 <= idx_b < len(rows):
                 for c in rows[idx_b]:
@@ -92,31 +99,29 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
         for c_idx, celda in enumerate(fila_enc):
             p, f = obtener_tiempo(celda, anio_global)
             if f == 'VAR':
-                # Si es VAR, intentamos asignarle el último período INDEX visto
-                if u_t:
+                if u_t: # Si hay un índice previo, esta columna es su variación
                     mapa_cols.append({'idx': c_idx, 't': u_t, 'f': u_f, 'tipo': 'VAR_PCT'})
             elif p and p != 'VAR_MARKER':
                 mapa_cols.append({'idx': c_idx, 't': p, 'f': f, 'tipo': 'INDEX'})
                 u_t, u_f = p, f
 
-        # Extraer filas de datos del bloque
+        # Procesar datos
         for r_idx in range(f_enc_idx + 1, f_fin):
             fila = rows[r_idx]
             if len(fila) <= col_rubro: continue
             rubro_lbl = str(fila[col_rubro]).strip()
-            
             if not es_rubro_valido(rubro_lbl): continue
             
-            # Si la fila tiene un año, actualizamos el anio_global para lo que queda
+            # Actualización de año en la misma fila (común en tablas largas)
             for c_f in fila:
-                m_f = re.fullmatch(r'(19|20)\d{2}', str(c_f).strip())
+                m_f = re.search(r'\b(19|20)\d{2}\b', str(c_f))
                 if m_f: anio_global = m_f.group(0)
 
             for mc in mapa_cols:
                 val = limpiar_numero(fila[mc['idx']] if mc['idx'] < len(fila) else None)
                 if val is not None:
-                    # Sincronizar el año si cambió durante la lectura
                     t_final = mc['t']
+                    # Sincronizar mes con el año actual del bloque
                     if mc['f'] == 'M' and anio_global and "-" in str(t_final):
                         t_final = f"{anio_global}-{str(t_final).split('-')[1]}"
                     
@@ -130,64 +135,46 @@ def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_meas
     return registros, None
 
 # ─── Interfaz Streamlit ──────────────────────────────────────────────────────
-uploaded_file = st.sidebar.file_uploader("Subir Excel (.xlsx, .xls)", type=["xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Subir Excel", type=["xlsx", "xls"])
 
 if uploaded_file:
     xl = pd.ExcelFile(uploaded_file)
-    sheet = st.sidebar.selectbox("Hoja de Datos", xl.sheet_names)
+    sheet = st.sidebar.selectbox("Hoja", xl.sheet_names)
     df_raw = xl.parse(sheet, header=None)
     rows = df_raw.values.tolist()
 
     st.sidebar.divider()
     ref_area = st.sidebar.text_input("REF_AREA", "AR-MZA")
-    unit_measure = st.sidebar.text_input("UNIT_MEASURE (Index)", "INDEX")
+    unit_measure = st.sidebar.text_input("UNIT_MEASURE", "INDEX")
     base_year = st.sidebar.text_input("BASE_YEAR", "2004")
     nombre_tabla = a_code(sheet)
 
-    c_ui_1, c_ui_2 = st.columns(2)
-    with c_ui_1:
-        st.markdown('<div class="step-box"><p class="step-title">1. Fila de Inicio</p></div>', unsafe_allow_html=True)
-        fila_inicio = st.number_input("Fila del primer encabezado", 1, len(rows), 1)
-    with c_ui_2:
-        st.markdown('<div class="step-box"><p class="step-title">2. Columna de Rubros</p></div>', unsafe_allow_html=True)
-        col_rubro = st.number_input("Columna de indicadores (A=0, B=1...)", 0, 20, 0)
+    c1, c2 = st.columns(2)
+    with c1: fila_inicio = st.number_input("Fila Inicio Encabezado", 1, len(rows), 1)
+    with c2: col_rubro = st.number_input("Columna Rubros (A=0)", 0, 20, 0)
 
     if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
         registros, error = parsear_datos_evolucionado(rows, fila_inicio-1, col_rubro, ref_area, unit_measure, base_year)
         
-        if error:
-            st.error(f"❌ {error}")
-        elif not registros:
-            st.warning("⚠️ No se detectaron datos válidos.")
+        if error: st.error(f"❌ {error}")
+        elif not registros: st.warning("⚠️ Sin datos.")
         else:
             df_out = pd.DataFrame(registros)
-            
-            # --- ORDENAMIENTO CRONOLÓGICO Y ESTRUCTURAL ---
-            df_out['msr_priority'] = df_out['OBS_MSR'].map({'INDEX': 0, 'VAR_PCT': 1})
-            # Ordenar por: Tiempo (1°), Indicador (2°), Prioridad de medida (3°)
-            df_out = df_out.sort_values(by=['TIME_PERIOD', 'INDICATOR', 'msr_priority'], ascending=[True, True, True])
-            df_out = df_out.drop(columns=['msr_priority'])
+            df_out['prio'] = df_out['OBS_MSR'].map({'INDEX': 0, 'VAR_PCT': 1})
+            df_out = df_out.sort_values(by=['TIME_PERIOD', 'INDICATOR', 'prio']).drop(columns=['prio'])
             
             anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
-            freqs = df_out['FREQ'].unique()
-
-            st.success(f"✅ Se procesaron {len(df_out):,} registros correctamente.")
+            st.success(f"✅ {len(df_out):,} registros procesados.")
             
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3 = st.columns(3)
             m1.metric("Registros", f"{len(df_out):,}")
             m2.metric("Rubros", df_out['INDICATOR'].nunique())
             m3.metric("Período", f"{anios[0]}—{anios[-1]}" if anios else "—")
-            m4.metric("Frecuencias", ", ".join(freqs))
 
-            with st.expander("👁️ Vista Previa (Orden Cronológico)", expanded=True):
-                st.dataframe(df_out, use_container_width=True)
-
-            csv_data = df_out.to_csv(index=False).encode('utf-8')
-            sql_data = generar_sql(nombre_tabla, f"{nombre_tabla}_sdmx.csv", ref_area)
+            st.dataframe(df_out, use_container_width=True)
             
-            d_col1, d_col2 = st.columns(2)
-            d_col1.download_button("⬇️ Descargar CSV", csv_data, f"{nombre_tabla}_sdmx.csv", "text/csv", use_container_width=True)
-            d_col2.download_button("⬇️ Descargar SQL", sql_data.encode('utf-8'), f"{nombre_tabla}.sql", use_container_width=True)
-            st.code(sql_data, language="sql")
+            csv = df_out.to_csv(index=False).encode('utf-8')
+            st.download_button("⬇️ Descargar CSV", csv, f"{nombre_tabla}.csv", "text/csv", use_container_width=True)
+            st.code(generar_sql(nombre_tabla, f"{nombre_tabla}.csv", ref_area), language="sql")
 else:
-    st.info("👋 Subí un archivo Excel en la barra lateral para empezar.")
+    st.info("Subí el archivo para empezar.")
