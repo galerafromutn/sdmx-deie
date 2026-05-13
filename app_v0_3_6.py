@@ -243,143 +243,123 @@ def clasificar_columnas(rows, fila_enc, enc_raw):
 
 # ─── Parser multi-bloque ──────────────────────────────────────────────────────
 
-def parsear_datos(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year):
+def resolver_dimension_temporal(v, anio_ctx):
     """
-    Procesa TODOS los bloques de la hoja.
-    Un bloque = fila de encabezado + filas de datos hasta el próximo encabezado.
-    Detecta bloques INDEX y bloques VAR_PCT por separado, y asocia las variaciones
-    al período correcto usando el bloque de índices precedente como referencia.
+    Jerarquía de detección:
+    1. Meses (Enero, Feb...)
+    2. Trimestres (1T, Q1...)
+    3. Años (2024, 2025...)
+    4. Texto genérico (Mendoza, Total...) -> Requiere año de contexto
     """
+    s_norm = normalizar(v)
+    
+    # 1. Meses
+    if s_norm in MESES_ES:
+        num_mes = MESES_ES[s_norm]
+        return f"{anio_ctx}-{num_mes:02d}" if anio_ctx else None, 'M'
+    
+    # 2. Trimestres
+    m_tri = re.search(r'(\d)[°º]?\s*(trim|t)', s_norm)
+    if m_tri:
+        num_tri = m_tri.group(1)
+        return f"{anio_ctx}-Q{num_tri}" if anio_ctx else None, 'Q'
+    
+    # 3. Años puros
+    m_anio = re.fullmatch(r'(19|20)\d{2}', str(v).strip())
+    if m_anio:
+        return m_anio.group(0), 'A'
+    
+    # 4. Variaciones (Si la celda dice "Var %")
+    if 'var' in s_norm or '%' in s_norm:
+        return 'VAR_PCT', 'VAR'
+        
+    return None, None
+
+def parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year):
     registros = []
-
-    # 1. Encontrar todas las filas que son encabezados de bloque
-    bloques = []
+    
+    # 1. Identificar todos los inicios de bloques (filas con potencial de encabezado)
+    puntos_de_control = []
     for i in range(fila_inicio, len(rows)):
-        enc = detectar_encabezado_en_fila(rows[i])
-        if enc:
-            bloques.append((i, enc))
+        enc_detectado = detectar_encabezado_en_fila(rows[i])
+        if enc_detectado:
+            puntos_de_control.append((i, enc_detectado))
 
-    if not bloques:
-        return [], "No se detectaron períodos temporales en la hoja."
+    if not puntos_de_control:
+        return [], "No se detectaron estructuras de datos válidas."
 
-    # 2. Para cada bloque VAR_PCT, encontrar el bloque INDEX más cercano anterior
-    #    para usar como referencia de períodos
-    def ultimo_bloque_index(b_idx, bloques_lista):
-        """Devuelve enc_raw del último bloque INDEX antes de b_idx."""
-        for j in range(b_idx - 1, -1, -1):
-            enc_ref = bloques_lista[j][1]
-            tipos = [p[0] if isinstance(p, tuple) else 'ANIO'
-                     for _, p, _ in enc_ref]
-            if 'VAR_PCT' not in tipos:
-                return enc_ref
-        return None
-
-    # 3. Procesar cada bloque
-    for b_idx, (fila_enc, enc_raw) in enumerate(bloques):
-        fila_fin = bloques[b_idx + 1][0] if b_idx + 1 < len(bloques) else len(rows)
-
-        col_tipo  = clasificar_columnas(rows, fila_enc, enc_raw)
-        cols_info = [(col_idx, periodo_raw, freq, col_tipo[col_idx])
-                     for col_idx, periodo_raw, freq in enc_raw]
-
-        # Determinar si este bloque es puramente VAR_PCT
-        es_bloque_var = all(col_tipo[ci] == 'VAR_PCT' for ci, _, _ in enc_raw)
-
-        # Referencia de índices para mapear períodos de variación
-        cols_index_ref = None
-        if es_bloque_var:
-            ref = ultimo_bloque_index(b_idx, bloques)
-            if ref:
-                cols_index_ref = ref  # lista de (col_idx, periodo_raw, freq)
-
-        # Buscar año de contexto en filas anteriores a este bloque
-        anio_ctx = None
-        buscar_desde = max(0, fila_enc - 10)
-        for row in rows[buscar_desde:fila_enc]:
-            for v in row:
-                m = re.search(r'\b(19|20)\d{2}\b', str(v))
+    # 2. Procesar cada bloque como una isla independiente
+    for idx, (fila_enc, enc_raw) in enumerate(puntos_de_control):
+        # El límite del bloque es el siguiente encabezado o el fin del archivo
+        fila_fin = puntos_de_control[idx + 1][0] if idx + 1 < len(puntos_de_control) else len(rows)
+        
+        # Determinar el contexto de este bloque específico
+        anio_bloque = None
+        # Buscar año en las 5 filas superiores al encabezado
+        for r_adj in rows[max(0, fila_enc-5):fila_enc]:
+            for celda in r_adj:
+                m = re.search(r'\b(19|20)\d{2}\b', str(celda))
                 if m:
-                    anio_ctx = int(m.group(0))
+                    anio_bloque = m.group(0)
+                    break
 
-        # Procesar filas de datos
-        for row in rows[fila_enc + 1 : fila_fin]:
-            col0 = str(row[col_rubro]).strip() if col_rubro < len(row) else ''
-
-            # Actualizar año de contexto
-            for v in row:
-                m = re.search(r'\b(19|20)\d{2}\b', str(v))
-                if m:
-                    nuevo = int(m.group(0))
-                    if 1980 <= nuevo <= 2030:
-                        anio_ctx = nuevo
-                        break
-
-            if not es_rubro_valido(col0):
-                continue
-
-            rubro_code  = a_code(col0)
-            rubro_label = col0
-
-            # Índice de posición dentro de las columnas VAR_PCT (para mapeo de período)
-            var_col_counter = 0
-
-            for col_idx, periodo_raw, freq, obs_msr in cols_info:
-                v_raw = row[col_idx] if col_idx < len(row) else ''
-                valor = limpiar_numero(v_raw)
-
-                # No emitir VAR_PCT sin valor (evita ruido)
-                if valor is None and obs_msr == 'VAR_PCT':
-                    var_col_counter += 1
-                    continue
-
-                if obs_msr == 'VAR_PCT':
-                    time_period, freq_final = resolver_time_period(
-                        periodo_raw, freq, anio_ctx,
-                        num_col_var=var_col_counter,
-                        cols_index_ref=cols_index_ref
-                    )
-                    var_col_counter += 1
-                else:
-                    time_period, freq_final = resolver_time_period(periodo_raw, freq, anio_ctx)
-
-                if time_period is None:
-                    continue
-
-                registros.append({
-                    'FREQ':            freq_final,
-                    'REF_AREA':        ref_area,
-                    'INDICATOR':       rubro_code,
-                    'INDICATOR_LABEL': rubro_label,
-                    'TIME_PERIOD':     time_period,
-                    'OBS_MSR':         obs_msr,
-                    'OBS_VALUE':       valor,
-                    'OBS_STATUS':      'A' if valor is not None else 'M',
-                    'UNIT_MEASURE':    unit_measure if obs_msr == 'INDEX' else 'PCT',
-                    'BASE_YEAR':       base_year,
+        # Mapa de columnas para este bloque
+        mapa_columnas = []
+        for col_idx, val_raw, _ in enc_raw:
+            periodo, freq = resolver_dimension_temporal(val_raw, anio_bloque)
+            if periodo or freq:
+                mapa_columnas.append({
+                    'idx': col_idx,
+                    'periodo': periodo,
+                    'freq': freq,
+                    'tipo': 'VAR_PCT' if freq == 'VAR' else 'INDEX'
                 })
 
-    # Deduplicar: si el mismo (TIME_PERIOD, INDICATOR, OBS_MSR) aparece en varios bloques,
-    # quedarse con el que tiene valor (el bloque más reciente suele ser más completo)
-    seen = {}
-    for r in registros:
-        key = (r['TIME_PERIOD'], r['INDICATOR'], r['OBS_MSR'])
-        if key not in seen or (seen[key]['OBS_VALUE'] is None and r['OBS_VALUE'] is not None):
-            seen[key] = r
+        # 3. Extraer datos del bloque
+        for r_idx in range(fila_enc + 1, fila_fin):
+            fila_actual = rows[r_idx]
+            
+            # Validar rubro
+            nombre_rubro = str(fila_actual[col_rubro]).strip() if col_rubro < len(fila_actual) else ""
+            if not es_rubro_valido(nombre_rubro):
+                continue
+            
+            # Si la fila contiene un año nuevo, actualizamos el contexto para lo que queda del bloque
+            for celda in fila_actual:
+                m = re.search(r'^(19|20)\d{2}$', str(celda).strip())
+                if m: 
+                    anio_bloque = m.group(0)
 
-    # Ordenar: período más reciente primero, dentro de cada período alfabético por indicador,
-    # y para cada (período + indicador) primero INDEX luego VAR_PCT.
-    # TIME_PERIOD tiene formato "2026-03" → negarlo como string no funciona,
-    # pero como son ISO 8601 la comparación lexicográfica invertida es correcta.
-    OBS_MSR_ORDEN = {'INDEX': 0, 'VAR_PCT': 1}
-    resultado = sorted(
-        seen.values(),
-        key=lambda x: (
-            tuple(-ord(c) for c in x['TIME_PERIOD']),  # TIME_PERIOD desc
-            x['INDICATOR'],                              # indicador A→Z
-            OBS_MSR_ORDEN.get(x['OBS_MSR'], 99)         # INDEX antes VAR_PCT
-        )
-    )
-    return resultado, None
+            # Procesar cada columna mapeada
+            for col in mapa_columnas:
+                valor_raw = fila_actual[col['idx']] if col['idx'] < len(fila_actual) else None
+                valor_num = limpiar_numero(valor_raw)
+                
+                # Si es una columna de variación pero no tiene valor, saltamos para no ensuciar el SDMX
+                if col['tipo'] == 'VAR_PCT' and valor_num is None:
+                    continue
+                
+                # Resolver el TIME_PERIOD final
+                time_p = col['periodo']
+                # Si el periodo era dependiente del año (ej: "Enero") y el año cambió en la fila
+                if col['freq'] == 'M' and anio_bloque and "-" in str(time_p):
+                    mes_solo = time_p.split("-")[1]
+                    time_p = f"{anio_bloque}-{mes_solo}"
+
+                registros.append({
+                    'FREQ': col['freq'] if col['freq'] != 'VAR' else 'M', # Fallback a Mensual si es var
+                    'REF_AREA': ref_area,
+                    'INDICATOR': a_code(nombre_rubro),
+                    'INDICATOR_LABEL': nombre_rubro,
+                    'TIME_PERIOD': time_p,
+                    'OBS_MSR': col['tipo'],
+                    'OBS_VALUE': valor_num,
+                    'OBS_STATUS': 'A' if valor_num is not None else 'M',
+                    'UNIT_MEASURE': unit_measure if col['tipo'] == 'INDEX' else 'PCT',
+                    'BASE_YEAR': base_year
+                })
+
+    return registros, None
 
 # ─── SQL ──────────────────────────────────────────────────────────────────────
 
@@ -520,7 +500,7 @@ st.markdown("""<div class="step-box">
 
 if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True):
     with st.spinner("Procesando todos los bloques..."):
-        registros, error = parsear_datos(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year)
+        registros, error = parsear_datos_evolucionado(rows, fila_inicio, col_rubro, ref_area, unit_measure, base_year)
 
     if error:
         st.error(f"❌ {error}")
