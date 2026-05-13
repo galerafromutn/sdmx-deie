@@ -491,11 +491,6 @@ if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True
             df_out = pd.DataFrame(registros)
             st.success(f"✅ Se procesaron {len(df_out)} registros correctamente.")
             # (Mantener el código de descarga y tablas igual)
-    else:
-        df_out = pd.DataFrame(registros)
-        anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
-        freqs_out = df_out['FREQ'].unique()
-        tiene_var = 'VAR_PCT' in df_out['OBS_MSR'].values
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Registros", f"{len(registros):,}")
