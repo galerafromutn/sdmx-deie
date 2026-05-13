@@ -508,34 +508,29 @@ if st.button("⚙️ Convertir a SDMX", type="primary", use_container_width=True
 
             # El resto del código de visualización (expander, botones de descarga) sigue igual...
 
-        if tiene_var:
-            st.info("ℹ️ Se detectaron columnas INDEX y VAR_PCT.")
-        else:
-            st.info("ℹ️ Solo se detectaron valores INDEX (sin columnas de variación %).")
+else:
+            df_out = pd.DataFrame(registros)
+            
+            # --- DEFINICIÓN DE VARIABLES PARA LA UI ---
+            anios = sorted(df_out['TIME_PERIOD'].str[:4].unique())
+            freqs_out = df_out['FREQ'].unique()
+            # Esta es la variable que faltaba:
+            tiene_var = 'VAR_PCT' in df_out['OBS_MSR'].values
+            # ------------------------------------------
 
-        with st.expander("👁️ Vista previa SDMX (primeros 30 registros)"):
-            st.dataframe(df_out.head(30), use_container_width=True)
+            st.success(f"✅ Se procesaron {len(df_out):,} registros correctamente.")
 
-        with st.expander("📋 Rubros detectados"):
-            st.dataframe(
-                df_out[['INDICATOR','INDICATOR_LABEL']].drop_duplicates().sort_values('INDICATOR'),
-                use_container_width=True
-            )
+            # Métricas
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Registros", f"{len(df_out):,}")
+            c2.metric("Rubros", df_out['INDICATOR'].nunique())
+            c3.metric("Período", f"{anios[0]}–{anios[-1]}" if anios else "—")
+            c4.metric("Frecuencia", ", ".join(f for f in freqs_out))
 
-        nombre_csv = f"{nombre_tabla}_sdmx.csv"
-        csv_bytes = df_out.to_csv(index=False).encode('utf-8')
-        sql = generar_sql(nombre_tabla, nombre_csv, ref_area)
-
-        dl1, dl2 = st.columns(2)
-        with dl1:
-            st.download_button("⬇️ Descargar CSV SDMX", csv_bytes,
-                file_name=nombre_csv, mime="text/csv", use_container_width=True)
-        with dl2:
-            st.download_button("⬇️ Descargar SQL", sql.encode('utf-8'),
-                file_name=f"{nombre_tabla}.sql", mime="text/plain", use_container_width=True)
-
-        with st.expander("📄 SQL para DBeaver"):
-            st.code(sql, language='sql')
-
+            # Sección de información sobre variaciones
+            if tiene_var:
+                st.info("ℹ️ Se detectaron columnas INDEX y VAR_PCT.")
+            else:
+                st.info("ℹ️ Solo se detectaron valores INDEX.")
 st.markdown("---")
 st.caption("Conversor SDMX v0.3.5 — DEIE Mendoza | Dirección de Estadísticas e Investigaciones Económicas")
